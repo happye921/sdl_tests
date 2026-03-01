@@ -1,2 +1,6 @@
 BasedOnStyle: LLVM
 ColumnLimit: 120
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+BreakBeforeBraces: Allman
+IndentCaseLabels: true
