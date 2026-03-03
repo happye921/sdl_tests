@@ -1,4 +1,4 @@
-#include "SDL3/SDL_rect.h"
+#include "SDL3/SDL_render.h"
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -42,6 +42,9 @@ struct GameResources
   // Player textures
   SDL_Texture *texIdle, *texRun, *texSlide;
 
+  // Backgroud textures
+  SDL_Texture *texBg1, *texBg2, *texBg3, *texBg4;
+
   // Tiles textures
   SDL_Texture *texBrick, *texGrass, *texGround, *texPanel;
 
@@ -70,6 +73,12 @@ struct GameResources
     texGrass = loadTexture(es.renderer, "resources/tiles/grass.png");
     texGround = loadTexture(es.renderer, "resources/tiles/ground.png");
     texPanel = loadTexture(es.renderer, "resources/tiles/panel.png");
+
+    // Load background textures
+    texBg1 = loadTexture(es.renderer, "resources/bg/bg_layer1.png");
+    texBg2 = loadTexture(es.renderer, "resources/bg/bg_layer2.png");
+    texBg3 = loadTexture(es.renderer, "resources/bg/bg_layer3.png");
+    texBg4 = loadTexture(es.renderer, "resources/bg/bg_layer4.png");
   }
 
   void unload()
@@ -85,13 +94,26 @@ struct GameResources
 
 struct GameState
 {
-  float floor;
   std::array<std::vector<GameObject>, 2> layers;
   int playerIndex;
+  SDL_FRect mapViewport;
+  float bg2scroll, bg3scroll, bg4scroll;
 
   GameState()
   {
     playerIndex = -1;
+  }
+
+  void SetupViewport(const EngineState &es)
+  {
+    mapViewport = {
+        .x = 0,
+        .y = 0,
+        .w = static_cast<float>(es.logicalWidth),
+        .h = static_cast<float>(es.logicalHeight),
+    };
+
+    bg2scroll = bg3scroll = bg4scroll = 0;
   }
 
   GameObject &player()
@@ -108,6 +130,7 @@ void checkCollision(const EngineState &es, GameObject &a, GameObject &b, float d
 void handleKeyInput(const EngineState &es, GameObject &obj, SDL_Scancode key, bool keyDown);
 void cleanupResources();
 void createTiles(const EngineState &es);
+void drawParalaxBackground(SDL_Renderer *renderer, SDL_Texture *texture, float xVelocity, float &scrollPos, float scrollFactor, float deltaTime);
 
 // Global variables
 GameResources res;
@@ -152,8 +175,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
   SDL_SetRenderVSync(es->renderer, 1);
 
   // Configure presentation
-  SDL_SetRenderLogicalPresentation(es->renderer, es->logicalWidth, es->logicalHeight,
-                                   SDL_LOGICAL_PRESENTATION_LETTERBOX);
+  SDL_SetRenderLogicalPresentation(es->renderer, es->logicalWidth, es->logicalHeight, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+
+  // Setup viewport
+  gameState.SetupViewport(*es);
 
   // Load game assets
   res.load(*es);
@@ -219,9 +244,17 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     }
   }
 
+  gameState.mapViewport.x = (gameState.player().position.x + TILE_SIZE / 2) - gameState.mapViewport.w / 2;
+
   // Render options
   SDL_SetRenderDrawColor(es->renderer, 20, 10, 30, 255);
   SDL_RenderClear(es->renderer);
+
+  // Draw background images
+  SDL_RenderTexture(es->renderer, res.texBg1, nullptr, nullptr);
+  drawParalaxBackground(es->renderer, res.texBg4, gameState.player().velocity.x, gameState.bg4scroll, 0.075f, deltaTime);
+  drawParalaxBackground(es->renderer, res.texBg3, gameState.player().velocity.x, gameState.bg3scroll, 0.15f, deltaTime);
+  drawParalaxBackground(es->renderer, res.texBg2, gameState.player().velocity.x, gameState.bg2scroll, 0.3f, deltaTime);
 
   // Draw objects
   for (auto &layer : gameState.layers)
@@ -234,16 +267,14 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
   // Render Debug info
   SDL_SetRenderDrawColor(es->renderer, 255, 255, 255, 255);
-  SDL_RenderDebugText(es->renderer, 5, 5,
-                      std::format("State: {} | Grounded: {}", static_cast<int>(gameState.player().data.player.state),
-                                  gameState.player().grounded)
-                          .c_str());
   SDL_RenderDebugText(
-      es->renderer, 5, 15,
-      std::format("Position: {} | Velocity: {}",
-                  std::format("{:.0f},{:.0f}", gameState.player().position.x, gameState.player().position.y),
-                  std::format("{:.0f},{:.0f}", gameState.player().velocity.x, gameState.player().velocity.y))
-          .c_str());
+      es->renderer, 5, 5,
+      std::format("State: {} | Grounded: {}", static_cast<int>(gameState.player().data.player.state), gameState.player().grounded).c_str());
+  SDL_RenderDebugText(es->renderer, 5, 15,
+                      std::format("Position: {} | Velocity: {}",
+                                  std::format("{:.0f},{:.0f}", gameState.player().position.x, gameState.player().position.y),
+                                  std::format("{:.0f},{:.0f}", gameState.player().velocity.x, gameState.player().velocity.y))
+                          .c_str());
 
   // Swap buffers and present
   SDL_RenderPresent(es->renderer);
@@ -273,8 +304,19 @@ void drawObject(const EngineState &es, GameObject &obj, float deltaTime)
 {
   float srcX = obj.currentAnimation != -1 ? obj.animations[obj.currentAnimation].currentFrame() * SPRITE_SIZE : 0.0f;
 
-  SDL_FRect src{.x = srcX, .y = 0, .w = SPRITE_SIZE, .h = SPRITE_SIZE};
-  SDL_FRect dst{.x = obj.position.x, .y = obj.position.y, .w = SPRITE_SIZE, .h = SPRITE_SIZE};
+  SDL_FRect src{
+      .x = srcX,
+      .y = 0,
+      .w = SPRITE_SIZE,
+      .h = SPRITE_SIZE,
+  };
+
+  SDL_FRect dst{
+      .x = obj.position.x - gameState.mapViewport.x,
+      .y = obj.position.y,
+      .w = SPRITE_SIZE,
+      .h = SPRITE_SIZE,
+  };
 
   SDL_FlipMode flipMode = obj.direction == -1 ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
   SDL_RenderTextureRotated(es.renderer, obj.texture, &src, &dst, 0, nullptr, flipMode);
@@ -415,8 +457,8 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
   }
 }
 
-void collisionResponse(const EngineState &es, const SDL_FRect &rectA, const SDL_FRect &rectB, const SDL_FRect &rectC,
-                       GameObject &objA, GameObject &objB, float deltaTime)
+void collisionResponse(const EngineState &es, const SDL_FRect &rectA, const SDL_FRect &rectB, const SDL_FRect &rectC, GameObject &objA,
+                       GameObject &objB, float deltaTime)
 {
   if (objA.type == ObjectType::player)
   {
@@ -495,10 +537,10 @@ void createTiles(const EngineState &es)
    6 - Brick
   */
   short map[MAP_ROWS][MAP_COLS] = {
-      {4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-      {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-      {0, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 2, 2, 2, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
       {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
   };
   // clang-format on
@@ -591,4 +633,22 @@ void handleKeyInput(const EngineState &es, GameObject &obj, SDL_Scancode key, bo
       }
     }
   }
+}
+
+void drawParalaxBackground(SDL_Renderer *renderer, SDL_Texture *texture, float xVelocity, float &scrollPos, float scrollFactor, float deltaTime)
+{
+  scrollPos -= xVelocity * scrollFactor * deltaTime;
+  if (scrollPos <= -texture->w)
+  {
+    scrollPos = 0;
+  }
+
+  SDL_FRect dst{
+      .x = scrollPos,
+      .y = 30,
+      .w = texture->w * 2.0f,
+      .h = static_cast<float>(texture->h),
+  };
+
+  SDL_RenderTextureTiled(renderer, texture, nullptr, 1, &dst);
 }
