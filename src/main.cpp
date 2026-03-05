@@ -1,4 +1,6 @@
 #include "SDL3/SDL_render.h"
+#include "SDL3/SDL_timer.h"
+#include "glm/detail/qualifier.hpp"
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -33,10 +35,17 @@ struct EngineState
 
 struct GameResources
 {
+  // Player animations
   const int ANIM_PLAYER_IDLE = 0;
   const int ANIM_PLAYER_RUN = 1;
   const int ANIM_PLAYER_SLIDE = 2;
   std::vector<Animation> playerAnims;
+
+  // Bullet animations
+  const int ANIM_BULLET_MOVING = 0;
+  const int ANIM_BULLET_HIT = 1;
+  std::vector<Animation> bulletAnims;
+
   std::vector<SDL_Texture *> textures;
 
   // Player textures
@@ -48,6 +57,9 @@ struct GameResources
   // Tiles textures
   SDL_Texture *texBrick, *texGrass, *texGround, *texPanel;
 
+  // Bullet tiles
+  SDL_Texture *texBullet, *texBulletHit;
+
   SDL_Texture *loadTexture(SDL_Renderer *renderer, const std::string &filepath)
   {
     SDL_Texture *tex = IMG_LoadTexture(renderer, filepath.c_str());
@@ -58,10 +70,16 @@ struct GameResources
 
   void load(EngineState &es)
   {
+    // Load player animations
     playerAnims.resize(5);
     playerAnims[ANIM_PLAYER_IDLE] = Animation(8, 1.6f);
     playerAnims[ANIM_PLAYER_RUN] = Animation(4, 0.5f);
     playerAnims[ANIM_PLAYER_SLIDE] = Animation(1, 5.0f);
+
+    // Load bullet animations
+    bulletAnims.resize(2);
+    bulletAnims[ANIM_BULLET_MOVING] = Animation(4, 0.05f);
+    bulletAnims[ANIM_BULLET_HIT] = Animation(4, 0.15f);
 
     // Load player textures
     texIdle = loadTexture(es.renderer, "resources/idle.png");
@@ -79,6 +97,10 @@ struct GameResources
     texBg2 = loadTexture(es.renderer, "resources/bg/bg_layer2.png");
     texBg3 = loadTexture(es.renderer, "resources/bg/bg_layer3.png");
     texBg4 = loadTexture(es.renderer, "resources/bg/bg_layer4.png");
+
+    // Load bullet textures
+    texBullet = loadTexture(es.renderer, "resources/bullet.png");
+    texBulletHit = loadTexture(es.renderer, "resources/bullet_hit.png");
   }
 
   void unload()
@@ -95,6 +117,9 @@ struct GameResources
 struct GameState
 {
   std::array<std::vector<GameObject>, 2> layers;
+  std::vector<GameObject> backgroundTiles;
+  std::vector<GameObject> foregroundTiles;
+  std::vector<GameObject> bullets;
   int playerIndex;
   SDL_FRect mapViewport;
   float bg2scroll, bg3scroll, bg4scroll;
@@ -125,7 +150,7 @@ struct GameState
 
 // Forward decls
 void update(const EngineState &es, GameObject &obj, float deltaTime);
-void drawObject(const EngineState &es, GameObject &obj, float deltaTime);
+void drawObject(const EngineState &es, GameObject &obj, float width, float height, float deltaTime);
 void checkCollision(const EngineState &es, GameObject &a, GameObject &b, float deltaTime);
 void handleKeyInput(const EngineState &es, GameObject &obj, SDL_Scancode key, bool keyDown);
 void cleanupResources();
@@ -244,6 +269,16 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     }
   }
 
+  // Update Bullets
+  for (GameObject &bullet : gameState.bullets)
+  {
+    update(*es, bullet, deltaTime);
+    if (bullet.currentAnimation != -1)
+    {
+      bullet.animations[bullet.currentAnimation].step(deltaTime);
+    }
+  }
+
   gameState.mapViewport.x = (gameState.player().position.x + TILE_SIZE / 2) - gameState.mapViewport.w / 2;
 
   // Render options
@@ -256,20 +291,53 @@ SDL_AppResult SDL_AppIterate(void *appstate)
   drawParalaxBackground(es->renderer, res.texBg3, gameState.player().velocity.x, gameState.bg3scroll, 0.15f, deltaTime);
   drawParalaxBackground(es->renderer, res.texBg2, gameState.player().velocity.x, gameState.bg2scroll, 0.3f, deltaTime);
 
+  // Draw background tiles
+  for (GameObject &obj : gameState.backgroundTiles)
+  {
+    SDL_FRect dst{
+        .x = obj.position.x - gameState.mapViewport.x,
+        .y = obj.position.y,
+        .w = static_cast<float>(obj.texture->w),
+        .h = static_cast<float>(obj.texture->h),
+    };
+
+    SDL_RenderTexture(es->renderer, obj.texture, nullptr, &dst);
+  }
+
   // Draw objects
   for (auto &layer : gameState.layers)
   {
     for (GameObject &obj : layer)
     {
-      drawObject(*es, obj, deltaTime);
+      drawObject(*es, obj, TILE_SIZE, TILE_SIZE, deltaTime);
     }
+  }
+
+  // Draw bullets
+  for (GameObject &bullet : gameState.bullets)
+  {
+    drawObject(*es, bullet, bullet.collider.w, bullet.collider.h, deltaTime);
+  }
+
+  // Draw foreground tiles
+  for (GameObject &obj : gameState.foregroundTiles)
+  {
+    SDL_FRect dst{
+        .x = obj.position.x - gameState.mapViewport.x,
+        .y = obj.position.y,
+        .w = static_cast<float>(obj.texture->w),
+        .h = static_cast<float>(obj.texture->h),
+    };
+
+    SDL_RenderTexture(es->renderer, obj.texture, nullptr, &dst);
   }
 
   // Render Debug info
   SDL_SetRenderDrawColor(es->renderer, 255, 255, 255, 255);
-  SDL_RenderDebugText(
-      es->renderer, 5, 5,
-      std::format("State: {} | Grounded: {}", static_cast<int>(gameState.player().data.player.state), gameState.player().grounded).c_str());
+  SDL_RenderDebugText(es->renderer, 5, 5,
+                      std::format("State: {} | Grounded: {} | Bullets: {}", static_cast<int>(gameState.player().data.player.state),
+                                  gameState.player().grounded, gameState.bullets.size())
+                          .c_str());
   SDL_RenderDebugText(es->renderer, 5, 15,
                       std::format("Position: {} | Velocity: {}",
                                   std::format("{:.0f},{:.0f}", gameState.player().position.x, gameState.player().position.y),
@@ -278,6 +346,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
   // Swap buffers and present
   SDL_RenderPresent(es->renderer);
+
+  // SDL_Delay(100);
 
   return SDL_APP_CONTINUE;
 }
@@ -300,22 +370,22 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
   }
 }
 
-void drawObject(const EngineState &es, GameObject &obj, float deltaTime)
+void drawObject(const EngineState &es, GameObject &obj, float width, float height, float deltaTime)
 {
-  float srcX = obj.currentAnimation != -1 ? obj.animations[obj.currentAnimation].currentFrame() * SPRITE_SIZE : 0.0f;
+  float srcX = obj.currentAnimation != -1 ? obj.animations[obj.currentAnimation].currentFrame() * width : 0.0f;
 
   SDL_FRect src{
       .x = srcX,
       .y = 0,
-      .w = SPRITE_SIZE,
-      .h = SPRITE_SIZE,
+      .w = width,
+      .h = height,
   };
 
   SDL_FRect dst{
       .x = obj.position.x - gameState.mapViewport.x,
       .y = obj.position.y,
-      .w = SPRITE_SIZE,
-      .h = SPRITE_SIZE,
+      .w = width,
+      .h = height,
   };
 
   SDL_FlipMode flipMode = obj.direction == -1 ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
@@ -347,6 +417,41 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
       obj.direction = currentDirection;
     }
 
+    Timer &weaponTimer = obj.data.player.weaponTimer;
+    weaponTimer.step(deltaTime);
+
+    const auto handleShooting = [&es, &obj, &weaponTimer]()
+    {
+      if (es.keys[SDL_SCANCODE_J])
+      {
+        if (weaponTimer.isTimeout())
+        {
+          weaponTimer.reset();
+          GameObject bullet;
+          bullet.type = ObjectType::bullet;
+          bullet.direction = gameState.player().direction;
+          bullet.texture = res.texBullet;
+          bullet.currentAnimation = res.ANIM_BULLET_MOVING;
+          bullet.collider = SDL_FRect{
+              .x = 0,
+              .y = 0,
+              .w = static_cast<float>(res.texBullet->h),
+              .h = static_cast<float>(res.texBullet->h),
+          };
+          bullet.velocity = glm::vec2(obj.velocity.x + 600.0f, 0) * bullet.direction;
+          bullet.animations = res.bulletAnims;
+
+          const float left = 4.0f;
+          const float right = 24.0f;
+          const float t = (obj.direction + 1) / 2.0f;
+          const float xOffset = left + right * t;
+          bullet.position = glm::vec2(obj.position.x + xOffset, obj.position.y + TILE_SIZE / 2 + 1);
+
+          gameState.bullets.push_back(bullet);
+        }
+      }
+    };
+
     switch (obj.data.player.state)
     {
       case PlayerState::idle:
@@ -371,6 +476,8 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
             }
           }
         }
+
+        handleShooting();
         obj.texture = res.texIdle;
         obj.currentAnimation = res.ANIM_PLAYER_IDLE;
         break;
@@ -381,6 +488,8 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
         {
           obj.data.player.state = PlayerState::idle;
         }
+
+        handleShooting();
 
         // Moving in opposite direction of velocity
         if (obj.velocity.x * obj.direction < 0 && obj.grounded)
@@ -397,6 +506,7 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
       }
       case PlayerState::jumping:
       {
+        handleShooting();
         obj.texture = res.texRun;
         obj.currentAnimation = res.ANIM_PLAYER_RUN;
         break;
@@ -496,6 +606,8 @@ void collisionResponse(const EngineState &es, const SDL_FRect &rectA, const SDL_
         break;
       case ObjectType::enemy:
         break;
+      case ObjectType::bullet:
+        break;
     }
   }
 }
@@ -537,66 +649,103 @@ void createTiles(const EngineState &es)
    6 - Brick
   */
   short map[MAP_ROWS][MAP_COLS] = {
-      {0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-      {0, 0, 2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {4, 0, 2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
       {0, 2, 2, 2, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
       {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
   };
-  // clang-format on
 
-  const auto createObject = [&es](int r, int c, SDL_Texture *tex, ObjectType type)
-  {
-    GameObject o;
-    float posX = c * TILE_SIZE;
-    float posY = es.logicalHeight - (MAP_ROWS - r) * TILE_SIZE;
-    o.type = type;
-    o.position = glm::vec2(posX, posY);
-    o.texture = tex;
-    o.collider = {.x = 0, .y = 0, .w = TILE_SIZE, .h = TILE_SIZE};
-    return o;
+  short foreground[MAP_ROWS][MAP_COLS] = {
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {5, 0, 0, 0, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
   };
 
-  for (int r = 0; r < MAP_ROWS; r++)
+  short background[MAP_ROWS][MAP_COLS] = {
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6, 0, 6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  };
+  // clang-format on
+
+  const auto loadMap = [&es](short layer[MAP_ROWS][MAP_COLS])
   {
-    for (int c = 0; c < MAP_COLS; c++)
+    const auto createObject = [&es](int r, int c, SDL_Texture *tex, ObjectType type)
     {
-      switch (map[r][c])
+      GameObject o;
+      float posX = c * TILE_SIZE;
+      float posY = es.logicalHeight - (MAP_ROWS - r) * TILE_SIZE;
+      o.type = type;
+      o.position = glm::vec2(posX, posY);
+      o.texture = tex;
+      o.collider = {.x = 0, .y = 0, .w = TILE_SIZE, .h = TILE_SIZE};
+      return o;
+    };
+
+    for (int r = 0; r < MAP_ROWS; r++)
+    {
+      for (int c = 0; c < MAP_COLS; c++)
       {
-        case 1:
+        switch (layer[r][c])
         {
-          GameObject ground = createObject(r, c, res.texGround, ObjectType::level);
-          gameState.layers[LAYER_IDX_LEVEL].push_back(ground);
-          break;
-        }
-        case 2:
-        {
-          GameObject panel = createObject(r, c, res.texPanel, ObjectType::level);
-          gameState.layers[LAYER_IDX_LEVEL].push_back(panel);
-          break;
-        }
+          case 1:
+          {
+            GameObject ground = createObject(r, c, res.texGround, ObjectType::level);
+            gameState.layers[LAYER_IDX_LEVEL].push_back(ground);
+            break;
+          }
+          case 2:
+          {
+            GameObject panel = createObject(r, c, res.texPanel, ObjectType::level);
+            gameState.layers[LAYER_IDX_LEVEL].push_back(panel);
+            break;
+          }
 
-        case 4: // player
-        {
-          GameObject player = createObject(r, c, res.texIdle, ObjectType::player);
-          player.data.player = PlayerData();
-          player.animations = res.playerAnims;
-          player.currentAnimation = res.ANIM_PLAYER_IDLE;
-          player.acceleration = glm::vec2(300, 0);
-          player.maxSpeedX = 100;
-          player.dynamic = true;
-          player.collider = {.x = 11, .y = 6, .w = 10, .h = 26};
+          case 4: // player
+          {
+            GameObject player = createObject(r, c, res.texIdle, ObjectType::player);
+            player.data.player = PlayerData();
+            player.animations = res.playerAnims;
+            player.currentAnimation = res.ANIM_PLAYER_IDLE;
+            player.acceleration = glm::vec2(300, 0);
+            player.maxSpeedX = 100;
+            player.dynamic = true;
+            player.collider = {.x = 11, .y = 6, .w = 10, .h = 26};
 
-          gameState.layers[LAYER_IDX_CHARACTERS].push_back(player);
-          gameState.playerIndex = gameState.layers[LAYER_IDX_CHARACTERS].size() - 1;
-          break;
+            gameState.layers[LAYER_IDX_CHARACTERS].push_back(player);
+            gameState.playerIndex = gameState.layers[LAYER_IDX_CHARACTERS].size() - 1;
+            break;
+          }
+
+          case 5: // Grass
+          {
+            GameObject grass = createObject(r, c, res.texGrass, ObjectType::level);
+            gameState.foregroundTiles.push_back(grass);
+            break;
+          }
+
+          case 6: // Brick
+          {
+            GameObject brick = createObject(r, c, res.texBrick, ObjectType::level);
+            gameState.backgroundTiles.push_back(brick);
+            break;
+          }
+
+          default:
+            break;
         }
-
-        default:
-          break;
       }
     }
-  }
+  };
+
+  loadMap(map);
+  loadMap(background);
+  loadMap(foreground);
 
   assert(gameState.playerIndex != -1);
 }

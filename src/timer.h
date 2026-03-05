@@ -38,5 +38,6 @@ public:
   void reset()
   {
     time = 0;
+    timeout = false;
   }
 };
