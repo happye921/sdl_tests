@@ -1,6 +1,3 @@
-#include "SDL3/SDL_render.h"
-#include "SDL3/SDL_timer.h"
-#include "glm/detail/qualifier.hpp"
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -130,10 +127,12 @@ struct GameState
   int playerIndex;
   SDL_FRect mapViewport;
   float bg2scroll, bg3scroll, bg4scroll;
+  bool debugMode;
 
   GameState()
   {
     playerIndex = -1;
+    debugMode = false;
   }
 
   void SetupViewport(const EngineState &es)
@@ -249,6 +248,10 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
   if (event->type == SDL_EVENT_KEY_UP)
   {
     handleKeyInput(*es, gameState.player(), event->key.scancode, false);
+    if (event->key.scancode == SDL_SCANCODE_F12)
+    {
+      gameState.debugMode = !gameState.debugMode;
+    }
     return SDL_APP_CONTINUE;
   };
 
@@ -340,16 +343,19 @@ SDL_AppResult SDL_AppIterate(void *appstate)
   }
 
   // Render Debug info
-  SDL_SetRenderDrawColor(es->renderer, 255, 255, 255, 255);
-  SDL_RenderDebugText(es->renderer, 5, 5,
-                      std::format("State: {} | Grounded: {} | Bullets: {}", static_cast<int>(gameState.player().data.player.state),
-                                  gameState.player().grounded, gameState.bullets.size())
-                          .c_str());
-  SDL_RenderDebugText(es->renderer, 5, 15,
-                      std::format("Position: {} | Velocity: {}",
-                                  std::format("{:.0f},{:.0f}", gameState.player().position.x, gameState.player().position.y),
-                                  std::format("{:.0f},{:.0f}", gameState.player().velocity.x, gameState.player().velocity.y))
-                          .c_str());
+  if (gameState.debugMode)
+  {
+    SDL_SetRenderDrawColor(es->renderer, 255, 255, 255, 255);
+    SDL_RenderDebugText(es->renderer, 5, 5,
+                        std::format("State: {} | Grounded: {} | Bullets: {}", static_cast<int>(gameState.player().data.player.state),
+                                    gameState.player().grounded, gameState.bullets.size())
+                            .c_str());
+    SDL_RenderDebugText(es->renderer, 5, 15,
+                        std::format("Position: {} | Velocity: {}",
+                                    std::format("{:.0f},{:.0f}", gameState.player().position.x, gameState.player().position.y),
+                                    std::format("{:.0f},{:.0f}", gameState.player().velocity.x, gameState.player().velocity.y))
+                            .c_str());
+  }
 
   // Swap buffers and present
   SDL_RenderPresent(es->renderer);
@@ -397,6 +403,31 @@ void drawObject(const EngineState &es, GameObject &obj, float width, float heigh
 
   SDL_FlipMode flipMode = obj.direction == -1 ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
   SDL_RenderTextureRotated(es.renderer, obj.texture, &src, &dst, 0, nullptr, flipMode);
+
+  if (gameState.debugMode)
+  {
+    SDL_FRect debugColliderRect{
+        .x = obj.position.x + obj.collider.x - gameState.mapViewport.x,
+        .y = obj.position.y + obj.collider.y,
+        .w = obj.collider.w,
+        .h = obj.collider.h,
+    };
+
+    SDL_SetRenderDrawBlendMode(es.renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(es.renderer, 255, 0, 0, 150);
+    SDL_RenderFillRect(es.renderer, &debugColliderRect);
+    SDL_SetRenderDrawBlendMode(es.renderer, SDL_BLENDMODE_NONE);
+
+    SDL_FRect debugColliderSensorRect{
+        .x = obj.position.x + obj.collider.x - gameState.mapViewport.x,
+        .y = obj.position.y + obj.collider.y + obj.collider.h,
+        .w = obj.collider.w,
+        .h = 1,
+    };
+
+    SDL_SetRenderDrawColor(es.renderer, 0, 0, 255, 255);
+    SDL_RenderFillRect(es.renderer, &debugColliderSensorRect);
+  }
 }
 
 void update(const EngineState &es, GameObject &obj, float deltaTime)
@@ -539,29 +570,31 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
   {
     for (GameObject &objB : layer)
     {
-      if (&obj != &objB)
+      if (&obj == &objB)
       {
-        checkCollision(es, obj, objB, deltaTime);
+        continue;
+      }
 
-        // Grounded sensor
-        SDL_FRect sensor{
-            .x = obj.position.x + obj.collider.x,
-            .y = obj.position.y + obj.collider.y + obj.collider.h,
-            .w = obj.collider.w,
-            .h = 1,
-        };
+      checkCollision(es, obj, objB, deltaTime);
+      // Grounded sensor
+      SDL_FRect sensor{
+          .x = obj.position.x + obj.collider.x,
+          .y = obj.position.y + obj.collider.y + obj.collider.h,
+          .w = obj.collider.w,
+          .h = 1,
+      };
 
-        SDL_FRect rectB{
-            .x = objB.position.x + objB.collider.x,
-            .y = objB.position.y + objB.collider.y,
-            .w = objB.collider.w,
-            .h = objB.collider.h,
-        };
+      SDL_FRect rectB{
+          .x = objB.position.x + objB.collider.x,
+          .y = objB.position.y + objB.collider.y,
+          .w = objB.collider.w,
+          .h = objB.collider.h,
+      };
 
-        if (SDL_HasRectIntersectionFloat(&sensor, &rectB))
-        {
-          foundGround = true;
-        }
+      SDL_FRect rectC{0, 0, 0, 0};
+      if (SDL_GetRectIntersectionFloat(&sensor, &rectB, &rectC))
+      {
+        foundGround = true;
       }
     }
   }
@@ -641,7 +674,6 @@ void checkCollision(const EngineState &es, GameObject &a, GameObject &b, float d
 
   if (SDL_GetRectIntersectionFloat(&rectA, &rectB, &rectC))
   {
-    // Found intersection
     collisionResponse(es, rectA, rectB, rectC, a, b, deltaTime);
   }
 }
