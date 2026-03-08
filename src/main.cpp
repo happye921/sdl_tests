@@ -1,3 +1,4 @@
+#include "SDL3/SDL_init.h"
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -241,6 +242,11 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 
   if (event->type == SDL_EVENT_KEY_DOWN)
   {
+    if (event->key.scancode == SDL_SCANCODE_Q)
+    {
+      return SDL_APP_SUCCESS;
+    }
+
     handleKeyInput(*es, gameState.player(), event->key.scancode, true);
     return SDL_APP_CONTINUE;
   };
@@ -326,6 +332,11 @@ SDL_AppResult SDL_AppIterate(void *appstate)
   // Draw bullets
   for (GameObject &bullet : gameState.bullets)
   {
+    if (bullet.data.bullet.state == BulletState::inactive)
+    {
+      continue;
+    }
+
     drawObject(*es, bullet, bullet.collider.w, bullet.collider.h, deltaTime);
   }
 
@@ -438,9 +449,10 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
     obj.velocity += glm::vec2(0, 500) * deltaTime;
   }
 
+  float currentDirection = 0;
+
   if (obj.type == ObjectType::player)
   {
-    float currentDirection = 0;
     if (es.keys[SDL_SCANCODE_A])
     {
       currentDirection += -1;
@@ -448,11 +460,6 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
     if (es.keys[SDL_SCANCODE_D])
     {
       currentDirection += 1;
-    }
-
-    if (currentDirection)
-    {
-      obj.direction = currentDirection;
     }
 
     Timer &weaponTimer = obj.data.player.weaponTimer;
@@ -469,6 +476,7 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
         {
           weaponTimer.reset();
           GameObject bullet;
+          bullet.data.bullet = BulletData();
           bullet.type = ObjectType::bullet;
           bullet.direction = gameState.player().direction;
           bullet.texture = res.texBullet;
@@ -479,7 +487,9 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
               .w = static_cast<float>(res.texBullet->h),
               .h = static_cast<float>(res.texBullet->h),
           };
-          bullet.velocity = glm::vec2(obj.velocity.x + 600.0f, 0) * bullet.direction;
+          const int yVariation = 40;
+          const float yVelocity = SDL_rand(yVariation) - yVariation / 2.0f;
+          bullet.velocity = glm::vec2(obj.velocity.x + 600.0f, yVelocity) * bullet.direction;
           bullet.animations = res.bulletAnims;
 
           const float left = 4.0f;
@@ -487,8 +497,23 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
           const float t = (obj.direction + 1) / 2.0f;
           const float xOffset = left + right * t;
           bullet.position = glm::vec2(obj.position.x + xOffset, obj.position.y + TILE_SIZE / 2 + 1);
+          bullet.maxSpeedX = 1000.0f;
 
-          gameState.bullets.push_back(bullet);
+          // Look for inactive bullets before spawning a new one
+          bool foundInactive = false;
+          for (size_t i = 0; i < gameState.bullets.size() && !foundInactive; i++)
+          {
+            if (gameState.bullets[i].data.bullet.state == BulletState::inactive)
+            {
+              foundInactive = true;
+              gameState.bullets[i] = bullet;
+            }
+          }
+
+          if (!foundInactive)
+          {
+            gameState.bullets.push_back(bullet);
+          }
         }
       }
       else
@@ -552,13 +577,41 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
         break;
       }
     }
-
-    // Add acceleration to velocity
-    obj.velocity += currentDirection * obj.acceleration * deltaTime;
-    if (std::abs(obj.velocity.x) > obj.maxSpeedX)
+  }
+  else if (obj.type == ObjectType::bullet)
+  {
+    switch (obj.data.bullet.state)
     {
-      obj.velocity.x = obj.maxSpeedX * currentDirection;
+      case BulletState::moving:
+      {
+        if (obj.position.x - gameState.mapViewport.x < 0 || obj.position.x - gameState.mapViewport.x > es.logicalWidth ||
+            obj.position.y - gameState.mapViewport.y < 0 || obj.position.y - gameState.mapViewport.y > es.logicalHeight)
+        {
+          obj.data.bullet.state = BulletState::inactive;
+        }
+        break;
+      }
+      case BulletState::colliding:
+        if (obj.animations[obj.currentAnimation].isDone())
+        {
+          obj.data.bullet.state = BulletState::inactive;
+        }
+        break;
+      case BulletState::inactive:
+        break;
     }
+  }
+
+  if (currentDirection)
+  {
+    obj.direction = currentDirection;
+  }
+
+  // Add acceleration to velocity
+  obj.velocity += currentDirection * obj.acceleration * deltaTime;
+  if (std::abs(obj.velocity.x) > obj.maxSpeedX)
+  {
+    obj.velocity.x = obj.maxSpeedX * currentDirection;
   }
 
   // Add velocity to position
@@ -612,6 +665,36 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
 void collisionResponse(const EngineState &es, const SDL_FRect &rectA, const SDL_FRect &rectB, const SDL_FRect &rectC, GameObject &objA,
                        GameObject &objB, float deltaTime)
 {
+  const auto genericResponse = [&]()
+  {
+    if (rectC.w < rectC.h)
+    {
+      // Horizontal collision
+      if (objA.velocity.x > 0) // going right
+      {
+        objA.position.x -= rectC.w;
+      }
+      else if (objA.velocity.x < 0) // going left
+      {
+        objA.position.x += rectC.w;
+      }
+      objA.velocity.x = 0;
+    }
+    else
+    {
+      // Vertical collision
+      if (objA.velocity.y > 0) // going down
+      {
+        objA.position.y -= rectC.h;
+      }
+      else if (objA.velocity.y < 0) // going up
+      {
+        objA.position.y += rectC.h;
+      }
+      objA.velocity.y = 0;
+    }
+  };
+
   if (objA.type == ObjectType::player)
   {
     switch (objB.type)
@@ -619,36 +702,28 @@ void collisionResponse(const EngineState &es, const SDL_FRect &rectA, const SDL_
       case ObjectType::player:
         break;
       case ObjectType::level:
-        if (rectC.w < rectC.h)
-        {
-          // Horizontal collision
-          if (objA.velocity.x > 0) // going right
-          {
-            objA.position.x -= rectC.w;
-          }
-          else if (objA.velocity.x < 0) // going left
-          {
-            objA.position.x += rectC.w;
-          }
-          objA.velocity.x = 0;
-        }
-        else
-        {
-          // Vertical collision
-          if (objA.velocity.y > 0) // going down
-          {
-            objA.position.y -= rectC.h;
-          }
-          else if (objA.velocity.y < 0) // going up
-          {
-            objA.position.y += rectC.h;
-          }
-          objA.velocity.y = 0;
-        }
+        genericResponse();
         break;
       case ObjectType::enemy:
         break;
       case ObjectType::bullet:
+        break;
+    }
+  }
+  else if (objA.type == ObjectType::bullet)
+  {
+    switch (objA.data.bullet.state)
+    {
+      case BulletState::moving:
+        genericResponse();
+        objA.velocity *= 0;
+        objA.data.bullet.state = BulletState::colliding;
+        objA.texture = res.texBulletHit;
+        objA.currentAnimation = res.ANIM_BULLET_HIT;
+        break;
+      case BulletState::colliding:
+        break;
+      case BulletState::inactive:
         break;
     }
   }
