@@ -1,6 +1,4 @@
-#include "SDL3/SDL_init.h"
-#include "SDL3/SDL_rect.h"
-#include "SDL3/SDL_render.h"
+#include "glm/geometric.hpp"
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -641,15 +639,29 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
   }
   else if (obj.type == ObjectType::enemy)
   {
-    switch (obj.data.enemy.state)
+    EnemyData &d = obj.data.enemy;
+    switch (d.state)
     {
       case EnemyState::idle:
+      {
+        glm::vec2 playerDir = gameState.player().position - obj.position;
+        if (glm::length(playerDir) < 100)
+        {
+          currentDirection = playerDir.x < 0 ? -1 : 1;
+          obj.acceleration = glm::vec2(30, 0);
+        }
+        else
+        {
+          obj.acceleration = glm::vec2(30, 0);
+          obj.velocity.x = 0;
+        }
         break;
+      }
       case EnemyState::damaged:
       {
-        if (obj.data.enemy.damagedTimer.step(deltaTime))
+        if (d.damagedTimer.step(deltaTime))
         {
-          obj.data.enemy.state = EnemyState::idle;
+          d.state = EnemyState::idle;
           obj.texture = res.texEnemy;
           obj.currentAnimation = res.ANIM_ENEMY;
         }
@@ -657,6 +669,7 @@ void update(const EngineState &es, GameObject &obj, float deltaTime)
       }
       case EnemyState::dead:
       {
+        obj.velocity.x = 0;
         if (obj.currentAnimation != -1 && obj.animations[obj.currentAnimation].isDone())
         {
           // Remove animation and set to last frame
@@ -768,10 +781,18 @@ void collisionResponse(const EngineState &es, const SDL_FRect &rectA, const SDL_
       case ObjectType::player:
         break;
       case ObjectType::level:
+      {
         genericResponse();
         break;
+      }
       case ObjectType::enemy:
+      {
+        if (objB.data.enemy.state != EnemyState::dead)
+        {
+          objA.velocity = glm::vec2(100, 0) * -objA.direction;
+        }
         break;
+      }
       case ObjectType::bullet:
         break;
     }
@@ -946,6 +967,7 @@ void createTiles(const EngineState &es)
                 .w = 12,
                 .h = 28,
             };
+            enemy.maxSpeedX = 15;
             enemy.dynamic = true;
             gameState.layers[LAYER_IDX_CHARACTERS].push_back(enemy);
             break;
